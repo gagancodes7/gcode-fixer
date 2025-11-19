@@ -16,54 +16,67 @@ const Files = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchFiles = async () => {
-    try {
-      setLoading(true);
-      // Simulated fetch - replace with actual API call
-      const savedFiles = localStorage.getItem('gcodeFiles');
-      if (savedFiles) {
-        setFiles(JSON.parse(savedFiles));
-      }
-    } catch (error) {
-      console.error('Failed to fetch files:', error);
-      toast.error('Failed to load files');
-    } finally {
-      setLoading(false);
-    }
-  };
+  try {
+    setLoading(true);
+    const octoUrl = localStorage.getItem("octoUrl");
+    const octoKey = localStorage.getItem("octoApiKey");
+
+    const res = await fetch(`${octoUrl}/api/files`, {
+      headers: { "X-Api-Key": octoKey }
+    });
+
+    const data = await res.json();
+    setFiles(data.files.local || []);
+  } catch (err) {
+    toast.error("Failed to load files");
+  } finally {
+    setLoading(false);
+  }
+};
 
   useEffect(() => {
     fetchFiles();
   }, []);
 
-  const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+ const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
 
-    if (!file.name.endsWith('.gcode') && !file.name.endsWith('.gco')) {
-      toast.error('Please upload a G-code file (.gcode or .gco)');
-      return;
-    }
+  if (!file.name.endsWith(".gcode") && !file.name.endsWith(".gco")) {
+    toast.error("Please upload a G-code file (.gcode or .gco)");
+    return;
+  }
 
-    try {
-      const newFile: FileData = {
-        name: file.name,
-        size: file.size,
-        date: Date.now()
-      };
-      
-      const updatedFiles = [...files, newFile];
-      setFiles(updatedFiles);
-      localStorage.setItem('gcodeFiles', JSON.stringify(updatedFiles));
-      toast.success(`${file.name} uploaded successfully`);
-      
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    } catch (error) {
-      console.error('Upload failed:', error);
-      toast.error('Upload failed');
-    }
-  };
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("select", "true"); // optional
+    formData.append("print", "false");
+
+    const octoUrl = localStorage.getItem("octoUrl");     // <-- user provided
+    const octoKey = localStorage.getItem("octoApiKey");  // <-- user provided
+
+    const res = await fetch(`${octoUrl}/api/files/local`, {
+      method: "POST",
+      headers: {
+        "X-Api-Key": octoKey
+      },
+      body: formData,
+    });
+
+    if (!res.ok) throw new Error("Upload failed");
+
+    toast.success(`${file.name} uploaded to OctoPrint`);
+    fetchFiles(); // reload list from OctoPrint
+  } catch (err) {
+    console.error(err);
+    toast.error("Failed to upload to OctoPrint");
+  } finally {
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+};
+
+
 
   const handleDelete = (filename: string) => {
     if (!confirm(`Delete ${filename}?`)) return;
@@ -79,9 +92,33 @@ const Files = () => {
     }
   };
 
-  const handlePrint = (filename: string) => {
-    toast.success(`Starting print: ${filename}`);
-  };
+  const handlePrint = async (filename: string) => {
+  try {
+    const octoUrl = localStorage.getItem("octoUrl");
+    const octoKey = localStorage.getItem("octoApiKey");
+
+    const res = await fetch(`${octoUrl}/api/files/local/${filename}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Api-Key": octoKey
+      },
+      body: JSON.stringify({
+        command: "select",
+        print: true
+      }),
+    });
+
+    if (!res.ok) throw new Error("Failed to start print");
+
+    toast.success(`Printing: ${filename}`);
+
+  } catch (err) {
+    console.error(err);
+    toast.error("Failed to start print job");
+  }
+};
+
 
   const formatSize = (bytes?: number) => {
     if (!bytes) return 'N/A';
