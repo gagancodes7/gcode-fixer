@@ -18,7 +18,7 @@ const App = () => (
     <TooltipProvider>
       <PrinterProvider>
         <Toaster />
-        <Sonner position="top-right" />
+        <Sonner position="bottom-right" />
         <BrowserRouter>
           <div className="flex min-h-screen w-full bg-background">
             <Sidebar />

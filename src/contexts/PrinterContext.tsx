@@ -1,119 +1,141 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { toast } from 'sonner';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  useCallback,
+} from "react";
 
-interface Printer {
+export interface Printer {
   id: string;
   name: string;
   serverUrl: string;
   apiKey: string;
-  color: string;
+  color?: string;
 }
 
 interface PrinterContextType {
   printers: Printer[];
   activePrinterId: string | null;
-  addPrinter: (printer: Omit<Printer, 'id'>) => Printer;
-  updatePrinter: (id: string, updates: Partial<Printer>) => void;
+  getActivePrinter: () => Printer | null;
+  addPrinter: (printer: Omit<Printer, "id">) => string;
+  updatePrinter: (id: string, data: Partial<Printer>) => void;
   deletePrinter: (id: string) => void;
   setActivePrinter: (id: string) => void;
-  getActivePrinter: () => Printer | undefined;
-  getPrinterById: (id: string) => Printer | undefined;
 }
 
 const PrinterContext = createContext<PrinterContextType | undefined>(undefined);
 
-export const usePrinter = () => {
-  const context = useContext(PrinterContext);
-  if (!context) {
-    throw new Error('usePrinter must be used within PrinterProvider');
-  }
-  return context;
+const LOCAL_PRINTERS_KEY = "printers";
+const LOCAL_ACTIVE_KEY = "activePrinterId";
+
+export const usePrinter = (): PrinterContextType => {
+  const ctx = useContext(PrinterContext);
+  if (!ctx) throw new Error("usePrinter must be used inside PrinterProvider");
+  return ctx;
 };
 
-export const PrinterProvider = ({ children }: { children: ReactNode }) => {
-  const [printers, setPrinters] = useState<Printer[]>([]);
-  const [activePrinterId, setActivePrinterId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const saved = localStorage.getItem('printers');
-    const savedActiveId = localStorage.getItem('activePrinterId');
-
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      setPrinters(parsed);
-      setActivePrinterId(savedActiveId || (parsed[0]?.id || null));
+export const PrinterProvider: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
+  const [printers, setPrinters] = useState<Printer[]>(() => {
+    try {
+      if (typeof window === "undefined") return [];
+      const raw = localStorage.getItem(LOCAL_PRINTERS_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
     }
-  }, []);
+  });
 
+  const [activePrinterId, setActivePrinterId] = useState<string | null>(() => {
+    try {
+      if (typeof window === "undefined") return null;
+      return localStorage.getItem(LOCAL_ACTIVE_KEY);
+    } catch {
+      return null;
+    }
+  });
+
+  // persist printers
   useEffect(() => {
-    if (printers.length > 0) {
-      localStorage.setItem('printers', JSON.stringify(printers));
+    try {
+      localStorage.setItem(LOCAL_PRINTERS_KEY, JSON.stringify(printers));
+    } catch (err) {
+      console.warn("Unable to save printers to localStorage", err);
     }
   }, [printers]);
 
+  // persist active id
   useEffect(() => {
-    if (activePrinterId) {
-      localStorage.setItem('activePrinterId', activePrinterId);
+    try {
+      if (activePrinterId) localStorage.setItem(LOCAL_ACTIVE_KEY, activePrinterId);
+      else localStorage.removeItem(LOCAL_ACTIVE_KEY);
+    } catch (err) {
+      console.warn("Unable to save activePrinterId", err);
     }
   }, [activePrinterId]);
 
-  const addPrinter = (printer: Omit<Printer, 'id'>) => {
-    const newPrinter = {
-      ...printer,
-      id: Date.now().toString(),
-    };
-    setPrinters([...printers, newPrinter]);
-    if (!activePrinterId) {
-      setActivePrinterId(newPrinter.id);
+  // If printers exist but no active selected, pick first
+  useEffect(() => {
+    if (printers.length > 0 && !activePrinterId) {
+      setActivePrinterId((prev) => prev ?? printers[0].id);
     }
-    toast.success(`Printer "${newPrinter.name}" added`);
-    return newPrinter;
-  };
+  }, [printers, activePrinterId]);
 
-  const updatePrinter = (id: string, updates: Partial<Printer>) => {
-    setPrinters(printers.map(p => p.id === id ? { ...p, ...updates } : p));
-    toast.success('Printer updated');
-  };
+  const getActivePrinter = useCallback(() => {
+    return printers.find((p) => p.id === activePrinterId) ?? null;
+  }, [printers, activePrinterId]);
 
-  const deletePrinter = (id: string) => {
-    setPrinters(printers.filter(p => p.id !== id));
-    if (activePrinterId === id) {
-      const remaining = printers.filter(p => p.id !== id);
-      setActivePrinterId(remaining[0]?.id || null);
+  const addPrinter = useCallback((data: Omit<Printer, "id">) => {
+    const id =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `p_${Date.now()}`;
+    const newPrinter = { id, ...data };
+    setPrinters((prev) => [...prev, newPrinter]);
+    setActivePrinterId(id); // auto-select new
+    return id;
+  }, []);
+
+  const updatePrinter = useCallback((id: string, update: Partial<Printer>) => {
+    setPrinters((prev) => prev.map((p) => (p.id === id ? { ...p, ...update } : p)));
+  }, []);
+
+  const deletePrinter = useCallback((id: string) => {
+    setPrinters((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      // if active removed, pick first or null
+      setActivePrinterId((current) => {
+        if (current !== id) return current;
+        return next.length > 0 ? next[0].id : null;
+      });
+      return next;
+    });
+  }, []);
+
+  const setActivePrinter = useCallback((id: string) => {
+    const exists = printers.some((p) => p.id === id);
+    if (!exists) {
+      console.warn("Trying to set active printer to unknown id:", id);
+      return;
     }
-    toast.success('Printer deleted');
-  };
+    setActivePrinterId(id);
+  }, [printers]);
 
-  const setActivePrinter = (id: string) => {
-    const printer = printers.find(p => p.id === id);
-    if (printer) {
-      setActivePrinterId(id);
-      toast.success(`Switched to ${printer.name}`);
-    }
-  };
-
-  const getActivePrinter = () => {
-    return printers.find(p => p.id === activePrinterId);
-  };
-
-  const getPrinterById = (id: string) => {
-    return printers.find(p => p.id === id);
-  };
-
-  return (
-    <PrinterContext.Provider
-      value={{
-        printers,
-        activePrinterId,
-        addPrinter,
-        updatePrinter,
-        deletePrinter,
-        setActivePrinter,
-        getActivePrinter,
-        getPrinterById,
-      }}
-    >
-      {children}
-    </PrinterContext.Provider>
+  const value = useMemo(
+    () => ({
+      printers,
+      activePrinterId,
+      getActivePrinter,
+      addPrinter,
+      updatePrinter,
+      deletePrinter,
+      setActivePrinter,
+    }),
+    [printers, activePrinterId, getActivePrinter, addPrinter, updatePrinter, deletePrinter, setActivePrinter]
   );
+
+  return <PrinterContext.Provider value={value}>{children}</PrinterContext.Provider>;
 };

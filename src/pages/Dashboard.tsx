@@ -1,225 +1,335 @@
-import { useState, useEffect } from 'react';
-import { Play, Pause, Square, Activity, Clock, RefreshCw } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Progress } from '@/components/ui/progress';
-import TemperatureCard from '@/components/TemperatureCard';
-import { api } from '@/lib/api';
-import { toast } from 'sonner';
+import { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import { usePrinter } from "@/contexts/PrinterContext";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+
+/**
+ * Dashboard.tsx
+ * - Option A layout: two large cards side-by-side (responsive)
+ * - Left: Print Status + job controls
+ * - Right: Temperature Control (manual set for nozzle and bed)
+ *
+ * NOTE: Local uploaded asset path included for developer transformation:
+ * This path is the uploaded file in the environment and will be transformed to a URL by dev infra.
+ */
+const LOCAL_ASSET_URL = "/mnt/data/0367c708-d6a3-4de4-9f98-45d0637d8948.png";
 
 const Dashboard = () => {
-  const [printerState, setPrinterState] = useState({
-    status: 'Disconnected',
-    bedTemp: { actual: 0, target: 0 },
-    toolTemp: { actual: 0, target: 0 },
-  });
+  const { getActivePrinter } = usePrinter();
+  const printer = getActivePrinter();
 
-  const [jobState, setJobState] = useState({
-    file: null as string | null,
-    progress: 0,
-    printTime: 0,
-    printTimeLeft: 0,
-    state: 'Operational',
-  });
+  const [job, setJob] = useState<any | null>(null);
+  const [printerInfo, setPrinterInfo] = useState<any | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const [refreshing, setRefreshing] = useState(false);
+  const [nozzleTarget, setNozzleTarget] = useState<number | "">("");
+  const [bedTarget, setBedTarget] = useState<number | "">("");
 
-  const fetchStatus = async () => {
+  // helper: percent clamp
+  const percent = (v?: number) =>
+    typeof v === "number" ? Math.min(Math.max(v, 0), 100) : 0;
+
+  // fetch both job and printer info
+  const fetchJobAndPrinter = async () => {
+    if (!printer) return;
     try {
-      setRefreshing(true);
-      const [printer, job] = await Promise.all([
-        api.getPrinterStatus(),
-        api.getJobStatus(),
+      const [jobRes, printerRes] = await Promise.all([
+        fetch(`${printer.serverUrl.replace(/\/$/, "")}/api/job`, {
+          headers: { "X-Api-Key": printer.apiKey || "" },
+        }),
+        fetch(`${printer.serverUrl.replace(/\/$/, "")}/api/printer`, {
+          headers: { "X-Api-Key": printer.apiKey || "" },
+        }),
       ]);
 
-      setPrinterState({
-        status: printer.state?.text || 'Unknown',
-        bedTemp: printer.temperature?.bed || { actual: 0, target: 0 },
-        toolTemp: printer.temperature?.tool0 || { actual: 0, target: 0 },
-      });
+      if (jobRes.ok) {
+        const j = await jobRes.json();
+        setJob(j);
+      } else {
+        console.debug("job fetch status", jobRes.status);
+      }
 
-      setJobState({
-        file: job.job?.file?.name || null,
-        progress: job.progress?.completion || 0,
-        printTime: job.progress?.printTime || 0,
-        printTimeLeft: job.progress?.printTimeLeft || 0,
-        state: job.state || 'Operational',
-      });
-    } catch (error) {
-      console.error('Failed to fetch status:', error);
-    } finally {
-      setRefreshing(false);
+      if (printerRes.ok) {
+        const p = await printerRes.json();
+        setPrinterInfo(p);
+      } else {
+        console.debug("printer fetch status", printerRes.status);
+      }
+    } catch (err) {
+      console.error("fetchJobAndPrinter error:", err);
     }
   };
 
   useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 5000);
+    if (!printer) {
+      setJob(null);
+      setPrinterInfo(null);
+      return;
+    }
+
+    setLoading(true);
+    fetchJobAndPrinter().finally(() => setLoading(false));
+
+    const interval = setInterval(() => {
+      fetchJobAndPrinter();
+    }, 1500);
+
     return () => clearInterval(interval);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printer?.id]);
 
-  const formatTime = (seconds: number) => {
-    if (!seconds) return '--:--:--';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
-  const handlePause = async () => {
+  // Generic job POST helper
+  const postJobCommand = async (body: any, successMsg = "Command sent") => {
+    if (!printer) {
+      toast.error("No active printer");
+      return;
+    }
     try {
-      await api.pauseJob();
-      await fetchStatus();
-    } catch (error) {
-      console.error('Pause failed:', error);
+      const res = await fetch(`${printer.serverUrl.replace(/\/$/, "")}/api/job`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Api-Key": printer.apiKey || "",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `status ${res.status}`);
+      }
+      toast.success(successMsg);
+      // refresh quickly
+      fetchJobAndPrinter();
+    } catch (err) {
+      console.error("postJobCommand error:", err);
+      toast.error("Command failed");
     }
   };
 
-  const handleResume = async () => {
+  const handlePause = () => postJobCommand({ command: "pause", action: "pause" }, "Paused");
+  const handleResume = () => postJobCommand({ command: "pause", action: "resume" }, "Resumed");
+  const handleCancel = () => {
+    if (!confirm("Cancel current print?")) return;
+    postJobCommand({ command: "cancel" }, "Print cancelled");
+  };
+
+  // Temperature set helper
+  const setTemperature = async (tool: "tool0" | "bed", temp: number) => {
+    if (!printer) {
+      toast.error("No active printer");
+      return;
+    }
     try {
-      await api.resumeJob();
-      await fetchStatus();
-    } catch (error) {
-      console.error('Resume failed:', error);
+      const res = await fetch(`${printer.serverUrl.replace(/\/$/, "")}/api/printer/temperature`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Api-Key": printer.apiKey || "",
+        },
+        body: JSON.stringify({
+          command: "target",
+          targets: {
+            [tool]: temp,
+          },
+        }),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(txt || `status ${res.status}`);
+      }
+      toast.success(`${tool === "tool0" ? "Nozzle" : "Bed"} target set to ${temp}°C`);
+      fetchJobAndPrinter();
+    } catch (err) {
+      console.error("setTemperature error:", err);
+      toast.error("Failed to set temperature");
     }
   };
 
-  const handleCancel = async () => {
-    if (!confirm('Cancel the current print job?')) return;
-    try {
-      await api.cancelJob();
-      await fetchStatus();
-    } catch (error) {
-      console.error('Cancel failed:', error);
-    }
-  };
+  const tempStr = (t?: any) =>
+    t ? `${t.actual ?? "—"}°C / ${t.target ?? "—"}°C` : "—";
 
-  const handleSetTemp = async (tool: string, temp: number) => {
-    try {
-      await api.setTemperature(tool, temp);
-      toast.success(`${tool} temperature set to ${temp}°C`);
-    } catch (error) {
-      console.error('Set temperature failed:', error);
-    }
-  };
+  // simple header area image url from uploaded file (developer will transform path -> url)
+  const headerImageUrl = useMemo(() => LOCAL_ASSET_URL, []);
 
   return (
-    <div className="min-h-screen p-4 sm:p-6 lg:p-8">
-      <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+      {/* Top header with small image (uses default Card styling) */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-4">
+          
           <div>
-            <h1 className="text-2xl sm:text-3xl font-bold text-foreground">Dashboard</h1>
-            <p className="text-sm text-muted-foreground mt-1">Monitor your 3D printer</p>
+            <h1 className="text-2xl font-bold">Dashboard</h1>
+            <p className="text-sm text-muted-foreground">Live printer status and manual controls</p>
           </div>
-          <Button 
-            onClick={fetchStatus} 
-            variant="outline" 
-            size="sm" 
-            className="gap-2 w-fit"
-            disabled={refreshing}
-          >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
         </div>
 
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          <Card className="bg-card border-border/50">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Activity className="w-5 h-5 text-primary" />
-                Printer Status
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{printerState.status}</div>
-            </CardContent>
-          </Card>
+        <div>
+          <div className="text-sm text-muted-foreground">Active printer</div>
+          <div className="mt-1 font-medium">{printer?.name ?? "None"}</div>
+        </div>
+      </div>
 
-          <Card className="bg-card border-border/50 md:col-span-2 lg:col-span-2">
-            <CardHeader>
-              <CardTitle>Current Job</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {jobState.file ? (
-                <>
-                  <div>
-                    <div className="text-lg font-medium truncate">{jobState.file}</div>
-                    <div className="text-sm text-muted-foreground">{jobState.state}</div>
-                  </div>
-                  
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-sm">
-                      <span>Progress</span>
-                      <span className="font-medium">{jobState.progress.toFixed(1)}%</span>
-                    </div>
-                    <Progress value={jobState.progress} />
-                  </div>
+      {/* Two column layout (left: status, right: temps) */}
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        {/* Left column: Print Status + Controls */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Print Status</CardTitle>
+          </CardHeader>
 
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <div className="text-muted-foreground">Print Time</div>
-                      <div className="font-medium flex items-center gap-1">
-                        <Clock className="w-4 h-4" />
-                        {formatTime(jobState.printTime)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground">Time Left</div>
-                      <div className="font-medium flex items-center gap-1">
-                        <Clock className="w-4 h-4" />
-                        {formatTime(jobState.printTimeLeft)}
-                      </div>
-                    </div>
-                  </div>
+          <CardContent>
+            <div className="space-y-4">
+              <div>
+                <div className="text-sm text-muted-foreground">State</div>
+                <div className="text-xl font-semibold">{job?.state ?? "Idle"}</div>
+              </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    {jobState.state === 'Printing' && (
-                      <Button onClick={handlePause} variant="outline" size="sm" className="gap-2 flex-1">
-                        <Pause className="w-4 h-4" />
-                        Pause
-                      </Button>
-                    )}
-                    {jobState.state === 'Paused' && (
-                      <Button onClick={handleResume} size="sm" className="gap-2 flex-1">
-                        <Play className="w-4 h-4" />
-                        Resume
-                      </Button>
-                    )}
-                    <Button onClick={handleCancel} variant="destructive" size="sm" className="gap-2 flex-1">
-                      <Square className="w-4 h-4" />
-                      Cancel
-                    </Button>
+              <div>
+                <div className="text-sm text-muted-foreground">File</div>
+                <div className="font-medium">{job?.job?.file?.name ?? "—"}</div>
+              </div>
+
+              <div>
+                <div className="text-sm text-muted-foreground">Progress</div>
+                <div className="mt-2">
+                  <Progress value={percent(job?.progress?.completion ?? 0)} />
+                  <div className="text-xs mt-1">
+                    {(job?.progress?.completion ?? 0).toFixed(1)}% •{" "}
+                    {job?.progress?.printTimeLeft
+                      ? `${Math.round(job.progress.printTimeLeft / 60)} min left`
+                      : job?.progress?.printTime
+                      ? `${Math.round(job.progress.printTime / 60)} min elapsed`
+                      : "—"}
                   </div>
-                </>
-              ) : (
-                <div className="text-center text-muted-foreground py-8">
-                  No active print job
                 </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+              </div>
 
-        <div className="grid gap-6 md:grid-cols-2">
-          <TemperatureCard
-            title="Hotend"
-            icon={<Activity className="w-5 h-5 text-primary" />}
-            actual={printerState.toolTemp.actual}
-            target={printerState.toolTemp.target}
-            onSetTemp={(temp) => handleSetTemp('tool0', temp)}
-            presets={[0, 180, 200, 220, 240]}
-          />
+              <div className="flex gap-3 flex-wrap mt-3">
+                <Button onClick={handlePause} size="sm">⏸ Pause</Button>
+                <Button onClick={handleResume} size="sm">▶ Resume</Button>
+                <Button onClick={handleCancel} size="sm" variant="destructive">⛔ Cancel</Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
-          <TemperatureCard
-            title="Bed"
-            icon={<Activity className="w-5 h-5 text-primary" />}
-            actual={printerState.bedTemp.actual}
-            target={printerState.bedTemp.target}
-            onSetTemp={(temp) => handleSetTemp('bed', temp)}
-            presets={[0, 50, 60, 70, 80]}
-          />
+        {/* Right column: Temperature Control */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Temperature Control</CardTitle>
+          </CardHeader>
+
+          <CardContent>
+            <div className="space-y-6">
+              {/* Nozzle */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm text-muted-foreground">Nozzle (tool0)</div>
+                    <div className="font-medium">{tempStr(printerInfo?.temperature?.tool0)}</div>
+                  </div>
+                  <div className="text-xs text-muted-foreground">Target / Actual</div>
+                </div>
+
+                <div className="mt-3 flex gap-2">
+                  <Input
+                    type="number"
+                    placeholder="°C"
+                    value={nozzleTarget}
+                    onChange={(e) => setNozzleTarget(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="w-28"
+                  />
+                  <Button
+                    onClick={() => {
+                      if (nozzleTarget !== "") setTemperature("tool0", Number(nozzleTarget));
+                    }}
+                    size="sm"
+                  >
+                    Set Nozzle
+                  </Button>
+
+                  {/* quick presets */}
+                  <div className="flex gap-2 ml-auto">
+                    <Button size="sm" onClick={() => setTemperature("tool0", 200)}>200°C</Button>
+                    <Button size="sm" onClick={() => setTemperature("tool0", 230)}>230°C</Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Bed */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm text-muted-foreground">Bed</div>
+                    <div className="font-medium">{tempStr(printerInfo?.temperature?.bed)}</div>
+                  </div>
+                  <div className="text-xs text-muted-foreground">Target / Actual</div>
+                </div>
+
+                <div className="mt-3 flex gap-2">
+                  <Input
+                    type="number"
+                    placeholder="°C"
+                    value={bedTarget}
+                    onChange={(e) => setBedTarget(e.target.value === "" ? "" : Number(e.target.value))}
+                    className="w-28"
+                  />
+                  <Button
+                    onClick={() => {
+                      if (bedTarget !== "") setTemperature("bed", Number(bedTarget));
+                    }}
+                    size="sm"
+                  >
+                    Set Bed
+                  </Button>
+
+                  {/* quick presets */}
+                  <div className="flex gap-2 ml-auto">
+                    <Button size="sm" onClick={() => setTemperature("bed", 60)}>60°C</Button>
+                    <Button size="sm" onClick={() => setTemperature("bed", 70)}>70°C</Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Extra info */}
+              {/* Live Temperature Status */}
+<Card className="mt-6">
+  <CardHeader>
+    <CardTitle className="text-md">Live Temperature Status</CardTitle>
+  </CardHeader>
+  <CardContent>
+    <div className="space-y-4">
+
+      {/* Nozzle */}
+      <div>
+        <div className="text-sm text-muted-foreground">Nozzle (tool0)</div>
+        <div className="text-lg font-semibold">
+          {printerInfo?.temperature?.tool0
+            ? `${printerInfo.temperature.tool0.actual}°C / ${printerInfo.temperature.tool0.target}°C`
+            : "—"}
         </div>
+      </div>
+
+      {/* Bed */}
+      <div>
+        <div className="text-sm text-muted-foreground">Bed</div>
+        <div className="text-lg font-semibold">
+          {printerInfo?.temperature?.bed
+            ? `${printerInfo.temperature.bed.actual}°C / ${printerInfo.temperature.bed.target}°C`
+            : "—"}
+        </div>
+      </div>
+
+    </div>
+  </CardContent>
+</Card>
+
+            </div>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
